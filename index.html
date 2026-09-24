@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EruditQuartetPad · пульт</title>
+    <link rel="icon" href="logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="css/app.css" />
+  </head>
+  <body class="op-page">
+    <div class="op">
+      <header class="top">
+        <div class="brand" title="EruditQuartetPad">
+          <img class="logo-mark" src="logo.svg" width="22" height="22" alt="" />
+          <span class="brand-text">ERUDITQUARTET<span class="soft">PAD</span></span>
+          <small>ЛУК · столы по 4</small>
+        </div>
+        <p class="status" id="status"></p>
+      </header>
+
+      <div class="work">
+        <section class="col-teams" id="setupPanel">
+          <label class="field">
+            <span id="teamCount">Команд: 0</span>
+            <textarea id="names" placeholder="Команда 1&#10;Команда 2&#10;Команда 3&#10;Команда 4&#10;Команда 5&#10;Команда 6"></textarea>
+          </label>
+          <p class="setup-hint">Одна команда на строку. Нужно от 6 до 16.</p>
+          <div class="checks">
+            <label><input id="shuffle" type="checkbox" checked /> Перемешать</label>
+          </div>
+          <div class="row setup-actions">
+            <button class="btn btn-primary" id="build" type="button">Сформировать таблицу</button>
+          </div>
+        </section>
+
+        <div class="col-fight">
+          <p class="toast" id="toast"></p>
+          <div class="now" id="now"></div>
+          <aside class="col-ops">
+            <button class="btn" id="openDisplay" type="button">Экран зала</button>
+            <button class="btn" id="schemeBtn" type="button" hidden>Схема турнира</button>
+            <button class="btn btn-primary" id="startBtn" type="button" hidden>Старт</button>
+            <button class="btn" id="undoBtn" type="button" hidden disabled>Отменить</button>
+            <button class="btn" id="stopBtn" type="button" hidden>Остановить игру</button>
+          </aside>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        function hall() {
+          var t = document.getElementById("toast");
+          if (t) {
+            t.textContent = "Открываю зал…";
+            t.classList.add("is-on");
+          }
+          fetch("/api/open-display", { cache: "no-store" })
+            .then(function (r) {
+              return r.json();
+            })
+            .then(function (info) {
+              if (!t) return;
+              if (info && info.ok) {
+                var m = (info.monitor || 0) + 1;
+                t.textContent = info.moved
+                  ? "Зал на мониторе " + m + ". Смотри второй экран."
+                  : "Зал открыт на мониторе " + m + ". Смотри второй экран.";
+              } else {
+                t.textContent = (info && info.error) || "Не удалось открыть зал";
+              }
+            })
+            .catch(function () {
+              if (t) t.textContent = "Нет лаунчера. Запустите EruditQuartet.bat";
+            });
+        }
+        function showToast(msg) {
+          var t = document.getElementById("toast");
+          if (!t) return;
+          t.textContent = msg || "";
+          t.classList.toggle("is-on", !!msg);
+        }
+        function publishState(st) {
+          window.__eqState = st;
+          try {
+            localStorage.setItem("erudit-quartet-state-v1", JSON.stringify(st));
+          } catch (e) {}
+          fetch("/api/state", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(st),
+          }).catch(function () {});
+          try {
+            if (typeof BroadcastChannel !== "undefined") {
+              new BroadcastChannel("erudit-quartet-v1").postMessage({ type: "state", state: st });
+            }
+          } catch (e) {}
+        }
+        function stopGame() {
+          if (typeof window.eqDoStop === "function") {
+            window.eqDoStop();
+            return;
+          }
+          var st = window.__eqState;
+          if (st) {
+            st.view = st.view || {};
+            st.view.phase = "editing";
+            st.view.hallScheme = false;
+            st.view.celebrate = null;
+            st.rev = (st.rev || 0) + 1;
+            publishState(st);
+          }
+          var build = document.getElementById("build");
+          if (build) build.hidden = false;
+          ["startBtn", "stopBtn", "schemeBtn", "undoBtn"].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) el.hidden = true;
+          });
+          var now = document.getElementById("now");
+          if (now)
+            now.innerHTML =
+              '<p class="kicker">Игра остановлена</p><h2>Можно добавить команды и сформировать таблицу</h2>';
+          var status = document.getElementById("status");
+          if (status) status.textContent = "Вставьте названия и сформируйте таблицу.";
+          showToast("");
+        }
+        function esc(s) {
+          return String(s || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+        function paintPult(st, mod) {
+          var now = document.getElementById("now");
+          if (!now || !st || !mod) return;
+          var ph = (st.view && st.view.phase) || "bracket";
+          var start = document.getElementById("startBtn");
+          var undo = document.getElementById("undoBtn");
+          var stop = document.getElementById("stopBtn");
+          var scheme = document.getElementById("schemeBtn");
+          var build = document.getElementById("build");
+          if (ph === "editing") {
+            if (build) build.hidden = false;
+            if (start) start.hidden = true;
+            if (stop) stop.hidden = true;
+            if (scheme) scheme.hidden = true;
+            if (undo) undo.hidden = true;
+            now.innerHTML =
+              '<p class="kicker">Игра остановлена</p><h2>Можно добавить команды и сформировать таблицу</h2>';
+            return;
+          }
+          if (build) build.hidden = true;
+          if (stop) stop.hidden = false;
+          if (scheme) scheme.hidden = false;
+          var champ = mod.champion(st);
+          if (champ) {
+            if (start) start.hidden = true;
+            now.innerHTML = '<p class="kicker">Турнир завершён</p><h2>' + esc(champ.name) + "</h2>";
+            return;
+          }
+          if (ph !== "fight") {
+            if (start) start.hidden = false;
+            if (undo) undo.hidden = true;
+            now.innerHTML =
+              '<p class="kicker">Таблица готова</p><h2>На зале — сетка. Старт — первый бой</h2>';
+            return;
+          }
+          if (start) start.hidden = true;
+          if (undo) undo.hidden = false;
+          var table = mod.currentTable(st);
+          if (!table) {
+            now.innerHTML = '<p class="kicker">Текущий бой</p><h2>Нет готового боя</h2>';
+            return;
+          }
+          if (table.status !== "live") mod.startTable(st, table);
+          var fight = mod.ensureFight(st, table);
+          if (mod.fightDone(fight) && table.status === "live") {
+            var ranks = (table.ranks && table.ranks.length)
+              ? table.ranks
+              : table.teamIds.filter(Boolean).map(function (id) {
+                  return { teamId: id, score: table.scores[id] || 0 };
+                });
+            var rankHtml = ranks
+              .map(function (r, i) {
+                var tm = mod.teamById(st, r.teamId);
+                return "<p>" + (i + 1) + ". " + esc(tm && tm.name) + " · " + (r.score || 0) + "</p>";
+              })
+              .join("");
+            now.innerHTML =
+              '<p class="kicker">' +
+              esc(table.title) +
+              '</p><h2>Раунд сыгран</h2><div class="next-fight">' +
+              rankHtml +
+              '</div><button class="btn btn-primary" type="button" id="finishBtn">Следующий стол</button>';
+            return;
+          }
+          var nom = mod.currentNominal(fight);
+          var roundName = mod.ROUND_NAMES[fight.round - 1] || "";
+          var teams = table.teamIds.filter(Boolean).map(function (id) {
+            return mod.teamById(st, id);
+          }).filter(Boolean);
+          var rows = teams
+            .map(function (t) {
+              var sc = table.scores[t.id] || 0;
+              return (
+                '<div class="eq-seat"><div class="fight-name" title="' +
+                esc(t.name) +
+                '">' +
+                esc(t.name) +
+                '</div><input class="eq-seat-score" data-score="' +
+                t.id +
+                '" type="number" step="1" value="' +
+                sc +
+                '"><div class="eq-pm">' +
+                '<button class="btn" type="button" data-ans="' +
+                t.id +
+                '" data-sign="-1">−' +
+                nom +
+                "</button>" +
+                '<button class="btn" type="button" data-ans="' +
+                t.id +
+                '" data-sign="1">+' +
+                nom +
+                "</button></div></div>"
+              );
+            })
+            .join("");
+          now.innerHTML =
+            '<p class="kicker">' +
+            esc(table.title) +
+            " · " +
+            esc(roundName) +
+            " · тема " +
+            (fight.themeIndex + 1) +
+            "/4</p><div class=\"vs-box\">" +
+            '<p class="kicker">Номинал ' +
+            nom +
+            '</p><div class="eq-line">' +
+            rows +
+            "</div>" +
+            '</div><div class="win-box"><div class="win-row">' +
+            '<button class="btn" type="button" id="undoStep">Отменить</button>' +
+            '<button class="btn" type="button" id="skipBtn">Дальше / снять</button>' +
+            '<button class="btn" type="button" id="finishEarly">Завершить раунд</button>' +
+            "</div></div>";
+        }
+        function bindNow(mod) {
+          var now = document.getElementById("now");
+          if (!now || now.dataset.eqNow) return;
+          now.dataset.eqNow = "1";
+          now.addEventListener("click", function (e) {
+            var st = window.__eqState;
+            if (!st || !mod) return;
+            var table = mod.currentTable(st);
+            if (!table) return;
+            var btn = e.target.closest("[data-ans]");
+            if (btn) {
+              var ok = mod.applyAnswer(st, table, btn.getAttribute("data-ans"), Number(btn.getAttribute("data-sign")));
+              if (!ok) {
+                showToast("Эта команда уже отвечала на этот вопрос.");
+                return;
+              }
+              st.rev = (st.rev || 0) + 1;
+              if (window.eqTakeState) window.eqTakeState(st);
+              else publishState(st);
+              paintPult(st, mod);
+              return;
+            }
+            if (e.target.id === "undoStep") {
+              if (!st.history || !st.history.length) {
+                showToast("Нечего отменять.");
+                return;
+              }
+              mod.undo(st);
+              window.__eqState = st;
+              if (st.view) st.view.celebrate = null;
+              st.rev = (st.rev || 0) + 1;
+              if (window.eqTakeState) window.eqTakeState(st);
+              else publishState(st);
+              paintPult(st, mod);
+              showToast("Шаг отменён.");
+              return;
+            }
+            if (e.target.id === "skipBtn") {
+              mod.skipQuestion(st, table);
+              st.rev = (st.rev || 0) + 1;
+              if (window.eqTakeState) window.eqTakeState(st);
+              else publishState(st);
+              paintPult(st, mod);
+              return;
+            }
+            if (e.target.id === "finishEarly") {
+              if (e.target.dataset.sure !== "1") {
+                e.target.dataset.sure = "1";
+                e.target.textContent = "Точно завершить?";
+                e.target.classList.add("is-warn");
+                showToast("Ещё раз — раунд этого стола закроется.");
+                var btn = e.target;
+                setTimeout(function () {
+                  if (btn && btn.dataset.sure === "1") {
+                    btn.dataset.sure = "";
+                    btn.textContent = "Завершить раунд";
+                    btn.classList.remove("is-warn");
+                  }
+                }, 4000);
+                return;
+              }
+              mod.finishTable(st, table);
+              var nx = mod.currentTable(st);
+              if (nx && nx.status !== "done") mod.startTable(st, nx);
+              st.rev = (st.rev || 0) + 1;
+              if (window.eqTakeState) window.eqTakeState(st);
+              else publishState(st);
+              paintPult(st, mod);
+              return;
+            }
+            if (e.target.id === "finishBtn") {
+              mod.finishTable(st, table);
+              var n = mod.currentTable(st);
+              if (n && n.status !== "done") mod.startTable(st, n);
+              st.rev = (st.rev || 0) + 1;
+              if (window.eqTakeState) window.eqTakeState(st);
+              else publishState(st);
+              paintPult(st, mod);
+            }
+          });
+          now.addEventListener("input", function (e) {
+            var st = window.__eqState;
+            if (!st || !mod) return;
+            var table = mod.currentTable(st);
+            if (!table) return;
+            if (e.target.id === "themeName") {
+              mod.setThemeName(table, e.target.value);
+              st.rev = (st.rev || 0) + 1;
+              publishState(st);
+            }
+            if (e.target.getAttribute("data-score")) {
+              var n = parseInt(String(e.target.value).replace(",", ""), 10);
+              table.scores[e.target.getAttribute("data-score")] = Number.isFinite(n) ? n : 0;
+              st.rev = (st.rev || 0) + 1;
+              publishState(st);
+            }
+          });
+        }
+        function startGame() {
+          import("./js/engine.js").then(function (mod) {
+            bindNow(mod);
+            var st = window.__eqState;
+            if (typeof window.eqDoStart === "function") {
+              window.eqDoStart();
+              st = window.__eqState || st;
+            } else {
+              if (!st) {
+                showToast("Сначала сформируй таблицу.");
+                return;
+              }
+              st.view = st.view || {};
+              st.view.phase = "fight";
+              st.view.hallScheme = false;
+              st.view.celebrate = null;
+              var table = mod.currentTable(st) || mod.nextTable(st);
+              if (table) mod.startTable(st, table);
+              st.rev = (st.rev || 0) + 1;
+              publishState(st);
+            }
+            paintPult(window.__eqState || st, mod);
+            showToast("");
+          });
+        }
+        function schemeToggle() {
+          if (typeof window.eqDoScheme === "function") {
+            window.eqDoScheme();
+            return;
+          }
+          var st = window.__eqState;
+          if (!st) return;
+          st.view = st.view || {};
+          st.view.hallScheme = !st.view.hallScheme;
+          st.rev = (st.rev || 0) + 1;
+          publishState(st);
+          var btn = document.getElementById("schemeBtn");
+          if (btn) btn.textContent = st.view.hallScheme ? "К текущему бою" : "Схема турнира";
+          showToast(st.view.hallScheme ? "На зале — полная схема." : "На зале — текущий бой.");
+        }
+        window.openHallScreen = hall;
+        function bind() {
+          var hallBtn = document.getElementById("openDisplay");
+          if (hallBtn && !hallBtn.dataset.hallBound) {
+            hallBtn.dataset.hallBound = "1";
+            hallBtn.addEventListener("click", hall);
+          }
+          var stopBtn = document.getElementById("stopBtn");
+          if (stopBtn && !stopBtn.dataset.stopBound) {
+            stopBtn.dataset.stopBound = "1";
+            stopBtn.addEventListener("click", stopGame);
+          }
+          var startBtn = document.getElementById("startBtn");
+          if (startBtn && !startBtn.dataset.startBound) {
+            startBtn.dataset.startBound = "1";
+            startBtn.addEventListener("click", startGame);
+          }
+          var schemeBtn = document.getElementById("schemeBtn");
+          if (schemeBtn && !schemeBtn.dataset.schemeBound) {
+            schemeBtn.dataset.schemeBound = "1";
+            schemeBtn.addEventListener("click", schemeToggle);
+          }
+          var buildBtn = document.getElementById("build");
+          if (buildBtn && !buildBtn.dataset.buildBound) {
+            buildBtn.dataset.buildBound = "1";
+            buildBtn.addEventListener("click", function () {
+              var t = document.getElementById("toast");
+              var namesEl = document.getElementById("names");
+              var shuffleEl = document.getElementById("shuffle");
+              function show(msg) {
+                if (!t) return;
+                t.textContent = msg;
+                t.classList.add("is-on");
+              }
+              var text = namesEl ? namesEl.value : "";
+              try {
+                localStorage.setItem("erudit-quartet-names-v1", text);
+              } catch (e) {}
+              import("./js/engine.js")
+                .then(function (mod) {
+                  try {
+                    var st = mod.createTournament(text, {
+                      shuffle: !!(shuffleEl && shuffleEl.checked),
+                    });
+                    st.view = {
+                      phase: "bracket",
+                      camera: "overview",
+                      hallScheme: false,
+                      celebrate: null,
+                    };
+                    if (typeof window.eqTakeState === "function") {
+                      window.eqTakeState(st);
+                    } else {
+                      window.__eqState = st;
+                      try {
+                        localStorage.setItem(
+                          "erudit-quartet-state-v1",
+                          JSON.stringify(st)
+                        );
+                      } catch (e) {}
+                      fetch("/api/state", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(st),
+                      }).catch(function () {});
+                      var now = document.getElementById("now");
+                      if (now)
+                        now.innerHTML =
+                          '<p class="kicker">Таблица готова</p><h2>На зале — сетка. Старт — первый бой</h2>';
+                      var start = document.getElementById("startBtn");
+                      if (start) start.hidden = false;
+                      var stop = document.getElementById("stopBtn");
+                      if (stop) stop.hidden = false;
+                      var scheme = document.getElementById("schemeBtn");
+                      if (scheme) scheme.hidden = false;
+                      buildBtn.hidden = true;
+                      var status = document.getElementById("status");
+                      if (status)
+                        status.innerHTML =
+                          st.teams.length + " команд · боёв: <strong>" + st.tables.length + "</strong>";
+                    }
+                    show("Таблица готова. Старт — первый бой");
+                  } catch (err) {
+                    show(err && err.message ? err.message : String(err));
+                  }
+                })
+                .catch(function (err) {
+                  show("Не загрузился движок: " + (err && err.message ? err.message : err));
+                });
+            });
+          }
+        }
+        bind();
+        document.addEventListener("DOMContentLoaded", bind);
+        var names = document.getElementById("names");
+        var count = document.getElementById("teamCount");
+        var NAMES_KEY = "erudit-quartet-names-v1";
+        function teamWord(n) {
+          var n10 = n % 10;
+          var n100 = n % 100;
+          if (n10 === 1 && n100 !== 11) return "команда";
+          if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return "команды";
+          return "команд";
+        }
+        function updateCount() {
+          if (!names || !count) return;
+          var n = names.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean).length;
+          count.textContent = n + " " + teamWord(n);
+        }
+        function saveNames() {
+          if (!names) return;
+          try {
+            localStorage.setItem(NAMES_KEY, names.value);
+          } catch (e) {}
+        }
+        if (names) {
+          names.readOnly = false;
+          try {
+            var draft = localStorage.getItem(NAMES_KEY);
+            if (draft && !names.value.trim()) names.value = draft;
+          } catch (e) {}
+          names.addEventListener("input", function () {
+            updateCount();
+            saveNames();
+          });
+          names.addEventListener("keyup", function () {
+            updateCount();
+            saveNames();
+          });
+          updateCount();
+        }
+      })();
+    </script>
+    <script type="module">
+      import("./js/operator.js").catch(function (err) {
+        var t = document.getElementById("toast");
+        if (t) {
+          t.textContent = "Пульт: " + (err && err.message ? err.message : err);
+          t.classList.add("is-on");
+        }
+      });
+    </script>
+  </body>
+</html>
